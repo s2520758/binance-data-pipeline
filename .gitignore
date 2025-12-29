@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+
+# Virtual env
+venv/
+.env/
+.venv/
+
+# VS Code
+.vscode/
+.idea/
+
+# Airflow
+airflow/logs/
+airflow/*.pid
+
+# Data / local output
+data/
+*.parquet
+*.csv
+*.log
+
+# Credentials / keys
+*.json
+*.key
+*.pem
+.boto
+.aws/
+
+# Docker noise
+*.tmp

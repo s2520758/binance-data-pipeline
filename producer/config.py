@@ -6,5 +6,6 @@ BRONZE_PREFIX = os.getenv("BRONZE_PREFIX", "bronze_trade_event")
 SILVER_PREFIX = os.getenv("SILVER_PREFIX", "silver_trade_event")
 FACT_PREFIX = os.getenv("FACT_PREFIX", "fact_trade_fee_tax")
 
-BQ_PROJECT = os.getenv("BQ_PROJECT", "project-fa672459-e6ce-4619-a6e")
-BQ_DATASET = os.getenv("BQ_DATASET", "binance_revenue")
+
+S3_BUCKET = os.getenv("S3_BUCKET", "your-s3-bucket-name") 
+BQ_PROJECT = os.getenv("BQ_PROJECT", "your-gcp-project-id")

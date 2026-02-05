@@ -1,131 +1,109 @@
-import argparse
-import os
+import io
+import uuid
+from pathlib import Path
+from typing import List
 
+import boto3
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from google.cloud import bigquery
 
-
-def load_silver_for_date(bucket: str, prefix: str, process_date: str) -> pd.DataFrame:
-    base = f"s3://{bucket}/{prefix}/date={process_date}/"
-    return pd.read_parquet(base)
+from config import AWS_REGION, S3_BUCKET, FACT_PREFIX, BQ_PROJECT, BQ_DATASET
 
 
-def load_rules(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
+def _bq_client() -> bigquery.Client:
+    return bigquery.Client(project=BQ_PROJECT)
 
 
-def build_fact(df_silver: pd.DataFrame, df_rules: pd.DataFrame, default_region: str) -> pd.DataFrame:
-    df = df_silver.copy()
-    df["region"] = default_region
+def _s3_client() -> boto3.client:
+    return boto3.client("s3", region_name=AWS_REGION)
 
-    df_rules_keyed = df_rules[["symbol", "region", "fee_rate_bps", "tax_rate_bps"]]
-    df = df.merge(
-        df_rules_keyed,
-        on=["symbol", "region"],
-        how="left",
-        suffixes=("", "_rule"),
+
+def _read_silver_from_bigquery(process_date: str) -> pd.DataFrame:
+    client = _bq_client()
+    table_id = f"{BQ_PROJECT}.{BQ_DATASET}.silver_trade_event"
+    query = f"""
+    SELECT event_date, symbol, traded_notional
+    FROM `{table_id}`
+    WHERE event_date = @event_date
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("event_date", "DATE", process_date)
+        ]
     )
-
-    df["fee_rate_bps"] = df["fee_rate_bps"].fillna(0.0)
-    df["tax_rate_bps"] = df["tax_rate_bps"].fillna(0.0)
-
-    df["fee_amount"] = df["notional"] * df["fee_rate_bps"] / 10000.0
-    df["tax_amount"] = df["notional"] * df["tax_rate_bps"] / 10000.0
-
-    cols = [
-        "symbol",
-        "region",
-        "event_ts",
-        "trade_ts",
-        "price",
-        "quantity",
-        "notional",
-        "fee_rate_bps",
-        "fee_amount",
-        "tax_rate_bps",
-        "tax_amount",
-        "is_buyer_maker",
-        "trade_id",
-    ]
-    existing_cols = [c for c in cols if c in df.columns]
-    df = df[existing_cols]
-
+    df = client.query(query, job_config=job_config).to_dataframe()
     return df
 
 
-def write_fact_to_s3(df_fact: pd.DataFrame, bucket: str, prefix: str, process_date: str) -> None:
-    base = f"s3://{bucket}/{prefix}/date={process_date}/"
-    df_fact.to_parquet(base, index=False)
+def _load_fee_tax_rules() -> pd.DataFrame:
+    here = Path(__file__).resolve().parent
+    rules_path = here / "rules" / "fee_tax_rules.csv"
+    df_rules = pd.read_csv(rules_path)
+    return df_rules
 
 
-def write_fact_to_bigquery(df_fact: pd.DataFrame) -> None:
-    project = os.getenv("BQ_PROJECT")
-    dataset = os.getenv("BQ_DATASET", "binance_revenue")
-    table = os.getenv("BQ_FACT_TABLE", "fact_trade_fee_tax")
+def _build_fact(df_silver: pd.DataFrame, df_rules: pd.DataFrame) -> pd.DataFrame:
+    if df_silver.empty:
+        return df_silver
 
-    if not project:
-        return
+    grouped = (
+        df_silver.groupby(["event_date", "symbol"], as_index=False)["traded_notional"].sum()
+    )
 
-    client = bigquery.Client(project=project)
+    df_rules = df_rules[["symbol", "region", "fee_rate_bps", "tax_rate_bps"]]
+    df = grouped.merge(df_rules, on="symbol", how="left")
 
-    df_bq = df_fact.copy()
-    df_bq["event_date"] = df_bq["event_ts"].dt.date
+    df["region"] = df["region"].fillna("EU")
+    df["fee_rate_bps"] = df["fee_rate_bps"].fillna(0.0)
+    df["tax_rate_bps"] = df["tax_rate_bps"].fillna(0.0)
+
+    df["fee_revenue"] = df["traded_notional"] * (df["fee_rate_bps"] / 10000.0)
+    df["tax_collected"] = df["traded_notional"] * (df["tax_rate_bps"] / 10000.0)
 
     cols = [
         "event_date",
         "symbol",
         "region",
-        "event_ts",
-        "trade_ts",
-        "price",
-        "quantity",
-        "notional",
-        "fee_rate_bps",
-        "fee_amount",
-        "tax_rate_bps",
-        "tax_amount",
-        "is_buyer_maker",
-        "trade_id",
+        "traded_notional",
+        "fee_revenue",
+        "tax_collected",
     ]
-    existing_cols = [c for c in cols if c in df_bq.columns]
-    df_bq = df_bq[existing_cols]
+    return df[cols]
 
-    table_id = f"{project}.{dataset}.{table}"
 
-    job_config = bigquery.LoadJobConfig(
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND
-    )
+def _write_fact_to_bigquery(df_fact: pd.DataFrame) -> None:
+    if df_fact.empty:
+        return
+    client = _bq_client()
+    table_id = f"{BQ_PROJECT}.{BQ_DATASET}.fact_trade_fee_tax"
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    client.load_table_from_dataframe(df_fact, table_id, job_config=job_config).result()
 
-    job = client.load_table_from_dataframe(df_bq, table_id, job_config=job_config)
-    job.result()
+
+def _write_fact_to_s3(df_fact: pd.DataFrame, process_date: str) -> None:
+    if df_fact.empty:
+        return
+    table = pa.Table.from_pandas(df_fact)
+    buf = io.BytesIO()
+    pq.write_table(table, buf, compression="snappy")
+    buf.seek(0)
+    key = f"{FACT_PREFIX}/date={process_date}/fact-{uuid.uuid4().hex}.parquet"
+    client = _s3_client()
+    client.put_object(Bucket=S3_BUCKET, Key=key, Body=buf.getvalue())
 
 
 def main(process_date: str) -> None:
-    bucket = os.getenv("S3_BUCKET", "ealtime-revenue-binance")
-    silver_prefix = os.getenv("SILVER_PREFIX", "silver_trade_event")
-    fact_prefix = os.getenv("FACT_PREFIX", "fact_trade_fee_tax")
-    rules_path = os.getenv("FEE_TAX_RULES_PATH", "config/fee_tax_rules.csv")
-    default_region = os.getenv("DEFAULT_REGION", "GLOBAL")
-
-    print(f"reading silver for date={process_date} from S3...")
-    df_silver = load_silver_for_date(bucket, silver_prefix, process_date)
-    print(f"silver rows: {len(df_silver)}")
-
-    df_rules = load_rules(rules_path)
-    df_fact = build_fact(df_silver, df_rules, default_region)
-    print(f"fact rows: {len(df_fact)}")
-
-    print("writing fact to S3...")
-    write_fact_to_s3(df_fact, bucket, fact_prefix, process_date)
-
-    print("writing fact to BigQuery...")
-    write_fact_to_bigquery(df_fact)
-    print("done")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--date", required=True)
-    args = parser.parse_args()
-    main(args.date)
-
+    df_silver = _read_silver_from_bigquery(process_date)
+    if df_silver.empty:
+        print(f"no silver rows for date={process_date}, skipping fact")
+        return
+    df_rules = _load_fee_tax_rules()
+    df_fact = _build_fact(df_silver, df_rules)
+    if df_fact.empty:
+        print(f"empty fact for date={process_date}, skipping")
+        return
+    _write_fact_to_bigquery(df_fact)
+    _write_fact_to_s3(df_fact, process_date)
+    print(f"fact done for date={process_date}, rows={len(df_fact)}")

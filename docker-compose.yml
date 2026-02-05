@@ -1,25 +1,119 @@
+version: '3.4'
+
 services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
+  postgres:
+    image: postgres:13
+    container_name: realtime-binance-revenue-postgres-1
     environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-bigquery great-expectations pandas pyarrow boto3 google-cloud-bigquery s3fs"
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
     ports:
-      - "2181:2181"
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  kafka:
-    image: confluentinc/cp-kafka:7.6.0
+  airflow-init:
+    image: apache/airflow:2.10.2
     depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
+      postgres:
+        condition: service_healthy
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-bigquery great-expectations pandas pyarrow boto3 google-cloud-bigquery s3fs"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    command: >
+      bash -c "airflow db migrate && 
+      airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@example.com --password admin"
 
+  webserver:
+    image: apache/airflow:2.10.2
+    container_name: realtime-binance-revenue-webserver-1
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+     
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-bigquery great-expectations pandas pyarrow boto3 google-cloud-bigquery s3fs"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      BQ_PROJECT: ${BQ_PROJECT}
+      
+
+
+      
+
+      DBT_PROFILES_DIR: /opt/airflow/dbt_project
+
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp-auth.json
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./producer:/opt/airflow/producer
+      - ./airflow/logs:/opt/airflow/logs
+      
+
+      - ./dbt_project:/opt/airflow/dbt_project
+      
+
+      - ./great_expectations:/opt/airflow/great_expectations
+      
+  
+      - ./gcp-auth-local.json:/opt/airflow/gcp-auth.json
+
+    ports:
+      - "8080:8080"
+    command: webserver
+
+  scheduler:
+    image: apache/airflow:2.10.2
+    container_name: realtime-binance-revenue-scheduler-1
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-bigquery great-expectations pandas pyarrow boto3 google-cloud-bigquery s3fs"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      BQ_PROJECT: ${BQ_PROJECT}
+      
+     
+      
+      DBT_PROFILES_DIR: /opt/airflow/dbt_project
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp-auth.json
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./producer:/opt/airflow/producer
+      - ./airflow/logs:/opt/airflow/logs
+      
+      - ./dbt_project:/opt/airflow/dbt_project
+      - ./great_expectations:/opt/airflow/great_expectations
+      - ./gcp-auth-local.json:/opt/airflow/gcp-auth.json
+      
+    command: scheduler
+
+volumes:
+  postgres_data:

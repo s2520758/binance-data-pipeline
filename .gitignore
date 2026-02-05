@@ -25,12 +25,33 @@ data/
 *.csv
 *.log
 
-# Credentials / keys
+
 *.json
 *.key
 *.pem
 .boto
 .aws/
 
-# Docker noise
+
 *.tmp
+
+.DS_Store
+__pycache__/
+*.pyc
+
+
+.env
+gcp-auth.json
+gcp-auth-local.json
+.user.yml
+
+
+airflow/logs/
+dbt_project/target/
+dbt_project/dbt_packages/
+postgres_data/
+
+
+.idea/
+.vscode/
+    

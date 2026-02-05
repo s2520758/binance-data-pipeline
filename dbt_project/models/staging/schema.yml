@@ -1,0 +1,24 @@
+version: 2
+
+sources:
+  - name: binance_source
+
+    database: "{{ env_var('BQ_PROJECT') }}"
+    schema: binance_data
+    tables:
+      # 假设你的 Python 脚本把原始数据写到了这张表
+      # 如果你的表名不一样，请在这里修改
+      - name: bronze_trades_raw
+        columns:
+          - name: trade_id
+            tests:
+              - unique
+              - not_null
+
+models:
+  - name: stg_binance_trades
+    columns:
+      - name: trade_id
+        tests:
+          - unique
+          - not_null

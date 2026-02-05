@@ -1,0 +1,8 @@
+apache-airflow
+pandas
+confluent-kafka
+websocket-client
+boto3
+google-cloud-bigquery
+pyarrow
+s3fs

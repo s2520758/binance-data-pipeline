@@ -1,0 +1,12 @@
+binance_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+     
+      method: oauth
+
+      project: "{{ env_var('BQ_PROJECT') }}"
+      dataset: binance_data
+      threads: 4
+      #location: europe-west2
